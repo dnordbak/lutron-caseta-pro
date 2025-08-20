@@ -115,7 +115,10 @@ async def request_configuration(hass, config, host, bridge):
 
         # run setup
         _LOGGER.debug("Running setup for host %s", host)
-        hass.async_add_job(async_setup_bridge, hass, config, fname, bridge)
+        hass.async_create_background_task(
+            async_setup_bridge(hass, config, fname, bridge),
+            name="lutron_setup_bridge"
+        )
         _LOGGER.debug("Releasing configurator.")
         configurator.request_done(request_id)
 
@@ -155,7 +158,10 @@ async def async_setup(hass, config):
                     host,
                     fname,
                 )
-                hass.async_add_job(request_configuration, hass, config, host, bridge)
+                hass.async_create_background_task(
+                    request_configuration(hass, config, host, bridge),
+                    name="lutron_request_configuration"
+                )
             else:
                 _LOGGER.debug("Loading Integration Report %s", fname)
                 await async_setup_bridge(hass, config, fname, bridge)
