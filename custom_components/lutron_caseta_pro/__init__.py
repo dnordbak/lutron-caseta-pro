@@ -86,7 +86,6 @@ async def request_configuration(hass, config, host, bridge):
     def setup_callback(data):
         """Set up the callback for configuration."""
         _LOGGER.debug("Entering callback for configuring host %s", host)
-        # get the integration report from callback data
         integration_report_data = data.get("integration_report")
         if not integration_report_data:
             configurator.notify_errors(
@@ -94,34 +93,28 @@ async def request_configuration(hass, config, host, bridge):
             )
             return False
 
-        # parse JSON integration report
         json_int_report = json.loads(integration_report_data)
 
-        # check for top-level object
-        if not json_int_report["LIPIdList"]:
+        if not json_int_report.get("LIPIdList"):
             configurator.notify_errors(
                 request_id,
-                "Error parsing Integration Report. "
-                "Expecting it to start "
-                "with 'LIPIdList'.",
+                "Error parsing Integration Report. Expecting it to start with 'LIPIdList'.",
             )
             return False
 
-        str_int_report = json.dumps(json_int_report, indent=2)
         fname = get_config_file(hass, host)
         _LOGGER.debug("Writing out JSON integration report to %s", fname)
         with open(fname, "w", encoding="utf-8") as outfile:
-            outfile.write(str_int_report)
+            json.dump(json_int_report, outfile, indent=2)
 
-        # run setup
-        _LOGGER.debug("Running setup for host %s", host)
+        # run setup using async_create_background_task
         hass.async_create_background_task(
             async_setup_bridge(hass, config, fname, bridge),
-            name="lutron_setup_bridge"
+            name=f"lutron_setup_bridge_{host}"
         )
+
         _LOGGER.debug("Releasing configurator.")
         configurator.request_done(request_id)
-
         return True
 
     _LOGGER.info("Requesting config from user for host %s", host)
@@ -130,37 +123,29 @@ async def request_configuration(hass, config, host, bridge):
         name="Lutron Caseta Smart Bridge PRO / Ra2 Select",
         callback=setup_callback,
         description="Enter the contents of the Integration Report:",
-        fields=[
-            {"id": "integration_report", "name": "Integration Report", "type": "string"}
-        ],
+        fields=[{"id": "integration_report", "name": "Integration Report", "type": "string"}],
         submit_caption="Submit",
     )
     _CONFIGURING[host] = request_id
 
 
-def get_config_file(hass, host):
-    """Return expected path to the integration report."""
-    return hass.config.path(DOMAIN + "_" + host + ".json")
-
-
 async def async_setup(hass, config):
-    """Initialize the component and loads the integration report."""
-    if CONF_BRIDGES in config[DOMAIN]:
+    """Initialize the component and load the integration report."""
+    if CONF_BRIDGES in config.get(DOMAIN, {}):
         for bridge in config[DOMAIN][CONF_BRIDGES]:
             host = bridge[CONF_HOST]
-            # get the file name for the JSON integration report
             fname = get_config_file(hass, host)
 
-            # check if the file exists
             if not os.path.exists(fname) or not os.path.isfile(fname):
                 _LOGGER.info(
                     "Integration Report for host %s not found at location %s",
                     host,
                     fname,
                 )
+                # use async_create_background_task for config request
                 hass.async_create_background_task(
                     request_configuration(hass, config, host, bridge),
-                    name="lutron_request_configuration"
+                    name=f"lutron_request_configuration_{host}"
                 )
             else:
                 _LOGGER.debug("Loading Integration Report %s", fname)
@@ -173,43 +158,26 @@ async def async_setup_bridge(hass, config, fname, bridge):
     """Initialize a bridge by loading its integration report."""
     _LOGGER.debug("Setting up bridge using Integration Report %s", fname)
 
-    devices = await hass.async_add_executor_job(casetify.load_integration_report, fname)
+    # Use the new async loader instead of the old sync function
+    devices = await casetify.async_load_integration_report(fname)
 
-    # Patch up device types from configuration.
-    # All other devices will be treated as lights.
     await _patch_device_types(bridge, devices)
     _LOGGER.debug("Patched device list %s", devices)
 
-    # sort devices based on device types
-    types = {
-        "sensor": [],
-        "switch": [],
-        "light": [],
-        "cover": [],
-        "scene": [],
-        "fan": [],
-    }
+    # Sort devices based on device types
+    types = {"sensor": [], "switch": [], "light": [], "cover": [], "scene": [], "fan": []}
     for device in devices:
         types[device["type"]].append(device)
 
-    # load MAC address used for unique IDs
-    mac_address = None
-    if CONF_MAC in bridge:
-        mac_address = bridge[CONF_MAC]
+    mac_address = bridge.get(CONF_MAC)
+    transition_time = bridge.get(CONF_TRANSITION_TIME)
 
-    # Load default transition time, if present.
-    transition_time = None
-    if CONF_TRANSITION_TIME in bridge:
-        transition_time = bridge[CONF_TRANSITION_TIME]
-
-    # load platform by type
     for device_type in types:
-        component = device_type
-        _LOGGER.debug("Loading platform %s", component)
+        _LOGGER.debug("Loading platform %s", device_type)
         hass.async_create_task(
             discovery.async_load_platform(
                 hass,
-                component,
+                device_type,
                 DOMAIN,
                 {
                     CONF_HOST: bridge[CONF_HOST],
@@ -220,6 +188,7 @@ async def async_setup_bridge(hass, config, fname, bridge):
                 config,
             )
         )
+
 
 
 async def _patch_device_types(bridge, devices):
